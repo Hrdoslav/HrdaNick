@@ -37,10 +37,11 @@ This plugin requires the following plugins to be installed:
 | `/nick list` | Lists all players with nicknames | `hrdanick.list` |
 | `/nick reload` | Reloads the plugin | `hrdanick.admin` |
 | `/nick resetall` | Resets all nicknames | `hrdanick.admin` |
+| `/nick random <player/@a` | Gives you random nickname from random.yml | `hrdanick.admin` |
 
 ## ⚙️ Configuration
 
-The plugin will automatically create a `config.yml` file in the `plugins/HrdaNick/` folder.
+The plugin will automatically create a `nicknames.yml` and `random.yml` files in the `plugins/HrdaNick/` folder.
 
 Important Game Rule:
 Set this game rule on your server:
