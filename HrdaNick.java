@@ -3,7 +3,6 @@ package cz.hrda.hrdaNick;
 
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
-import org.bukkit.OfflinePlayer;
 import org.bukkit.command.*;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -24,30 +23,32 @@ import java.util.*;
 
 public final class HrdaNick extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
 
-    private File nicknamesFile;
-    private FileConfiguration nicknamesConfig;
-    private final Map<UUID, String> nicknames = new HashMap<>();
+    private File nicknamesFile, randomFile;
+    private FileConfiguration nicknamesConfig, randomConfig;
+    private final Map<UUID, String> nicknames = new HashMap<>(); // Formát: "Nick|Skin"
+    private final Random random = new Random();
 
     @Override
     public void onEnable() {
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
+
         nicknamesFile = new File(getDataFolder(), "nicknames.yml");
         if (!nicknamesFile.exists()) saveResource("nicknames.yml", false);
 
-        loadNicknames();
+        randomFile = new File(getDataFolder(), "random.yml");
+        if (!randomFile.exists()) saveResource("random.yml", false);
 
-        if (!nicknamesConfig.contains("settings.global-tab-complete")) {
-            nicknamesConfig.set("settings.global-tab-complete", true);
-            saveNicknamesConfig();
-        }
+        loadConfigs();
 
         getServer().getPluginManager().registerEvents(this, this);
         getCommand("nick").setExecutor(this);
         getCommand("nick").setTabCompleter(this);
     }
 
-    private void loadNicknames() {
+    private void loadConfigs() {
         nicknamesConfig = YamlConfiguration.loadConfiguration(nicknamesFile);
+        randomConfig = YamlConfiguration.loadConfiguration(randomFile);
+
         nicknames.clear();
         if (nicknamesConfig.contains("nicks")) {
             for (String key : nicknamesConfig.getConfigurationSection("nicks").getKeys(false)) {
@@ -64,37 +65,71 @@ public final class HrdaNick extends JavaPlugin implements Listener, CommandExecu
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) return false;
 
-        // --- ADMIN COMMANDS ---
         if (args[0].equalsIgnoreCase("reload") && sender.hasPermission("hrdanick.admin")) {
-            loadNicknames();
+            loadConfigs();
             for (Player p : Bukkit.getOnlinePlayers()) {
-                String nick = nicknames.get(p.getUniqueId());
-                if (nick != null) applyNick(p, nick);
-            }
-            sender.sendMessage("§a[HrdaNick] Configuration reloaded!");
-            return true;
-        }
-
-        if (args[0].equalsIgnoreCase("list") && sender.hasPermission("hrdanick.admin")) {
-            sender.sendMessage("§6§lList of nicked players:");
-            if (nicknamesConfig.contains("nicks")) {
-                for (String uuidStr : nicknamesConfig.getConfigurationSection("nicks").getKeys(false)) {
-                    String nick = nicknamesConfig.getString("nicks." + uuidStr);
-                    OfflinePlayer op = Bukkit.getOfflinePlayer(UUID.fromString(uuidStr));
-                    sender.sendMessage("§e" + (op.getName() != null ? op.getName() : "Neznámý") + " §7-> §f" + ChatColor.translateAlternateColorCodes('&', nick));
+                String data = nicknames.get(p.getUniqueId());
+                if (data != null && data.contains("|")) {
+                    String[] parts = data.split("\\|");
+                    applyNick(p, parts[0], parts[1]);
                 }
+            }
+            sender.sendMessage("§a[HrdaNick] All configs reloaded!");
+            return true;
+        }
+
+        // /nick list
+        if (args[0].equalsIgnoreCase("list") && sender.hasPermission("hrdanick.admin")) {
+            sender.sendMessage("§6--- List of active nicks ---");
+            if (!nicknamesConfig.contains("nicks") || nicknamesConfig.getConfigurationSection("nicks").getKeys(false).isEmpty()) {
+                sender.sendMessage("§cNone found.");
             } else {
-                sender.sendMessage("§7None found.");
+                for (String uuidStr : nicknamesConfig.getConfigurationSection("nicks").getKeys(false)) {
+                    UUID uuid = UUID.fromString(uuidStr);
+                    String data = nicknamesConfig.getString("nicks." + uuidStr);
+                    String nick = data.split("\\|")[0];
+
+                    // Zkusíme najít jméno hráče (i offline)
+                    org.bukkit.OfflinePlayer op = Bukkit.getOfflinePlayer(uuid);
+                    String realName = (op.getName() != null) ? op.getName() : uuidStr;
+
+                    sender.sendMessage("§e" + realName + " §7-> §f" + ChatColor.translateAlternateColorCodes('&', nick));
+                }
             }
             return true;
         }
 
+        // /nick resetall
         if (args[0].equalsIgnoreCase("resetall") && sender.hasPermission("hrdanick.admin")) {
-            for (Player p : Bukkit.getOnlinePlayers()) performReset(p);
+            // 1. Resetujeme online hráče
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                if (nicknames.containsKey(p.getUniqueId())) {
+                    performReset(p);
+                }
+            }
+
+            // 2. Kompletní smazání z configu a paměti (pro offline hráče)
             nicknames.clear();
             nicknamesConfig.set("nicks", null);
             saveNicknamesConfig();
-            sender.sendMessage("§a[HrdaNick] All players were cleared from nicknames.yml!");
+
+            sender.sendMessage("§a[HrdaNick] All nicks were removed (even the offline ones).");
+            return true;
+        }
+
+        if (args[0].equalsIgnoreCase("random") && sender.hasPermission("hrdanick.admin") && args.length >= 2) {
+            if (args[1].equalsIgnoreCase("@a")) {
+                for (Player p : Bukkit.getOnlinePlayers()) setRandomNick(p);
+                sender.sendMessage("§a[HrdaNick] Random nick applied to everyone!");
+            } else {
+                Player target = Bukkit.getPlayer(args[1]);
+                if (target != null) setRandomNick(target);
+            }
+            return true;
+        }
+
+        if (args[0].equalsIgnoreCase("reset") && sender instanceof Player p) {
+            performReset(p);
             return true;
         }
 
@@ -102,121 +137,114 @@ public final class HrdaNick extends JavaPlugin implements Listener, CommandExecu
             Player target = Bukkit.getPlayer(args[1]);
             if (target != null) {
                 String newNick = ChatColor.translateAlternateColorCodes('&', args[2]);
-                saveAndApply(target, newNick);
+                saveAndApply(target, newNick, ChatColor.stripColor(newNick));
             }
             return true;
         }
 
-        if (args[0].equalsIgnoreCase("reset")) {
-            if (args.length == 2 && args[1].equalsIgnoreCase("@a") && sender.hasPermission("hrdanick.admin")) {
-                for (Player p : Bukkit.getOnlinePlayers()) performReset(p);
-                return true;
-            }
-            if (sender instanceof Player p) performReset(p);
-            return true;
-        }
-
-        // --- PLAYER COMMAND: /nick <nick> ---
-        if (sender instanceof Player p) {
-            if (!p.hasPermission("hrdanick.use")) {
-                p.sendMessage("§cYou don't have permissions!");
-                return true;
-            }
+        if (sender instanceof Player p && p.hasPermission("hrdanick.use")) {
             String newNick = ChatColor.translateAlternateColorCodes('&', args[0]);
-            saveAndApply(p, newNick);
-            p.sendMessage("§aYou nick is now: §f" + newNick);
+            saveAndApply(p, newNick, ChatColor.stripColor(newNick));
+            p.sendMessage("§aYour nick is now: §f" + newNick);
             return true;
         }
         return true;
     }
 
-    private void saveAndApply(Player p, String nick) {
-        nicknames.put(p.getUniqueId(), nick);
-        nicknamesConfig.set("nicks." + p.getUniqueId(), nick);
+    private void setRandomNick(Player p) {
+        List<String> prefixes = randomConfig.getStringList("parts.prefixes");
+        List<String> mains = randomConfig.getStringList("parts.mains");
+        List<String> suffixes = randomConfig.getStringList("parts.suffixes");
+        List<String> skins = randomConfig.getStringList("skins");
+
+        String prefix = (random.nextDouble() < randomConfig.getDouble("chances.prefix", 0.5)) ?
+                prefixes.get(random.nextInt(prefixes.size())) : "";
+        String main = mains.get(random.nextInt(mains.size()));
+        String suffix = (random.nextDouble() < randomConfig.getDouble("chances.suffix", 0.5)) ?
+                suffixes.get(random.nextInt(suffixes.size())) : "";
+
+        String finalNick = ChatColor.translateAlternateColorCodes('&', prefix + main + suffix);
+        String randomSkin = skins.get(random.nextInt(skins.size()));
+
+        saveAndApply(p, finalNick, randomSkin);
+    }
+
+    private void saveAndApply(Player p, String nick, String skin) {
+        String data = nick + "|" + skin;
+        nicknames.put(p.getUniqueId(), data);
+        nicknamesConfig.set("nicks." + p.getUniqueId(), data);
         saveNicknamesConfig();
-        applyNick(p, nick);
+        applyNick(p, nick, skin);
+    }
+
+    private void applyNick(Player player, String nick, String skinName) {
+        if (player == null || !player.isOnline()) return;
+
+        // Odstraníme barevné kódy pro technické účely (NickAPI a TabList)
+        String plain = ChatColor.stripColor(nick);
+
+        // 1. Nastavíme technický nick v NickAPI
+        NickAPI.setNick(player, plain);
+
+        // 2. Refresh hráče - změní model a jméno pro ostatní hráče (nutné pro Tab)
+        NickAPI.refreshPlayer(player);
+
+        // 3. Bukkit jména
+        // setDisplayName mění jméno v chatu (zde barvy chceme)
+        player.setDisplayName(nick);
+
+        // setPlayerListName nastavujeme jako PLAIN (bez barev),
+        // aby Minecraft a ostatní pluginy správně doplňovaly jméno v příkazech
+        player.setPlayerListName(plain);
+
+        // 4. Nastavení skinu - Delay 30 ticků je klíčový, aby NickAPI nepřepsalo skin
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (player.isOnline()) {
+                // Používáme příkaz skinu až po kompletním refreshi identity
+                player.performCommand("skin set " + skinName);
+            }
+        }, 30L);
     }
 
     private void performReset(Player player) {
-        // 1. KROK: Hráč si vymaže skin (SUDO)
-        // Opět používáme performCommand, aby to proběhlo pod identitou hráče
-        if (player.isOnline()) {
-            player.performCommand("skin clear");
-        }
-
-        // 2. KROK: Odstranění z databáze a configu
         nicknames.remove(player.getUniqueId());
         nicknamesConfig.set("nicks." + player.getUniqueId(), null);
         saveNicknamesConfig();
 
-        // 3. KROK: Reset vizuálních věcí přes NickAPI a Bukkit
+        player.performCommand("skin clear");
         NickAPI.resetNick(player);
         NickAPI.refreshPlayer(player);
         player.setDisplayName(player.getName());
         player.setPlayerListName(player.getName());
-        player.setCustomName(null);
-
-        player.sendMessage("§a[HrdaNick] Your nick have been reset!");
-    }
-
-    private void applyNick(Player player, String nick) {
-        if (player == null) return;
-
-        String plain = ChatColor.stripColor(nick);
-
-        // 1. KROK: Hráč si nastaví skin sám za sebe (SUDO)
-        // Dáme mu 2 ticky, aby se to nepohádalo s joinem
-        Bukkit.getScheduler().runTaskLater(this, () -> {
-            if (player.isOnline()) {
-                player.performCommand("skin set " + plain);
-            }
-        }, 2L);
-
-        // 2. KROK: FINÁLNÍ ÚDER (NickAPI a jména)
-        // Počkáme celou sekundu (20 ticků), než SkinsRestorer dokončí svůj refresh.
-        // Tím zajistíme, že NickAPI bude mít poslední slovo.
-        Bukkit.getScheduler().runTaskLater(this, () -> {
-            if (player.isOnline()) {
-                // Nejdřív nastavíme nick v API
-                NickAPI.setNick(player, plain);
-
-
-                // A nakonec vnutíme barevná jména do Bukkitu
-                player.setDisplayName(nick);
-                player.setPlayerListName(nick);
-                player.setCustomName(nick);
-                player.setCustomNameVisible(false);
-            }
-        }, 25L); // Zvýšeno na 25 ticků (cca 1.2 sekundy)
-    }
-
-    @EventHandler(priority = EventPriority.LOW)
-    public void onChat(AsyncPlayerChatEvent event) {
-        if (event.isCancelled()) return;
-        String nick = nicknames.get(event.getPlayer().getUniqueId());
-        if (nick != null) {
-            event.setCancelled(true);
-            Bukkit.broadcastMessage("<" + nick + ChatColor.WHITE + "> " + event.getMessage());
-        }
+        player.sendMessage("§a[HrdaNick] Reset done!");
     }
 
     @EventHandler(priority = EventPriority.HIGH)
-    public void onQuit(PlayerQuitEvent event) {
-        String nick = nicknames.get(event.getPlayer().getUniqueId());
-        if (nick != null && event.getQuitMessage() != null) {
-            event.setQuitMessage(event.getQuitMessage().replace(event.getPlayer().getName(), nick + ChatColor.YELLOW));
+    public void onChat(AsyncPlayerChatEvent event) {
+        String data = nicknames.get(event.getPlayer().getUniqueId());
+        if (data != null && data.contains("|")) {
+            String nick = data.split("\\|")[0];
+            // Nastavíme formát místo broadcastu
+            event.setFormat(nick + ChatColor.WHITE + ": %2$s");
         }
     }
 
     @EventHandler(priority = EventPriority.HIGH)
     public void onJoin(PlayerJoinEvent event) {
-        Player player = event.getPlayer();
-        String nick = nicknames.get(player.getUniqueId());
-        if (nick != null) {
-            if (event.getJoinMessage() != null) {
-                event.setJoinMessage(event.getJoinMessage().replace(player.getName(), nick + ChatColor.YELLOW));
-            }
-            Bukkit.getScheduler().runTaskLater(this, () -> applyNick(player, nick), 10L);
+        String data = nicknames.get(event.getPlayer().getUniqueId());
+        if (data != null && data.contains("|")) {
+            String[] parts = data.split("\\|");
+            event.setJoinMessage(event.getJoinMessage().replace(event.getPlayer().getName(), parts[0] + ChatColor.YELLOW));
+            Bukkit.getScheduler().runTaskLater(this, () -> applyNick(event.getPlayer(), parts[0], parts[1]), 15L);
+        }
+    }
+
+    @EventHandler
+    public void onRespawn(PlayerRespawnEvent event) {
+        String data = nicknames.get(event.getPlayer().getUniqueId());
+        if (data != null && data.contains("|")) {
+            String[] parts = data.split("\\|");
+            Bukkit.getScheduler().runTaskLater(this, () -> applyNick(event.getPlayer(), parts[0], parts[1]), 20L);
         }
     }
 
@@ -238,50 +266,79 @@ public final class HrdaNick extends JavaPlugin implements Listener, CommandExecu
     }
 
     private String replaceAllNames(String message, Player p) {
-        String nick = nicknames.get(p.getUniqueId());
-        if (nick == null) return message;
+        String data = nicknames.get(p.getUniqueId());
+        if (data == null || !data.contains("|")) return message;
 
+        String nick = data.split("\\|")[0]; // Vezmeme jen nick před svislítkem
         String real = p.getName();
-        String display = ChatColor.stripColor(p.getDisplayName());
 
-        message = message.replace(real, nick);
-        message = message.replace(display, nick);
-
-        return message;
+        // Přidáme RESET, aby barva nicku nepřebarvila zbytek zprávy
+        return message.replace(real, nick + ChatColor.RESET);
     }
 
-    @EventHandler
-    public void onRespawn(PlayerRespawnEvent event) {
-        String nick = nicknames.get(event.getPlayer().getUniqueId());
-        if (nick != null) {
-            Bukkit.getScheduler().runTaskLater(this, () -> applyNick(event.getPlayer(), nick), 15L);
-        }
-    }
     @EventHandler
     public void onCommandPreprocess(PlayerCommandPreprocessEvent event) {
         String msg = event.getMessage();
         String[] parts = msg.split(" ");
         boolean changed = false;
+
+        // Procházíme všechny argumenty příkazu (vynecháme nultý, což je samotný příkaz)
         for (int i = 1; i < parts.length; i++) {
             for (Map.Entry<UUID, String> entry : nicknames.entrySet()) {
-                if (ChatColor.stripColor(entry.getValue()).equalsIgnoreCase(parts[i])) {
+                String data = entry.getValue();
+                if (data == null || !data.contains("|")) continue;
+
+                // Získáme čistý nick bez barev a bez skinu (vezmeme část před '|')
+                String savedNick = ChatColor.stripColor(data.split("\\|")[0]);
+
+                // Porovnáme s tím, co hráč napsal jako argument
+                if (savedNick.equalsIgnoreCase(parts[i])) {
                     Player target = Bukkit.getPlayer(entry.getKey());
-                    if (target != null) { parts[i] = target.getName(); changed = true; }
+                    if (target != null) {
+                        // Nahradíme nick v příkazu skutečným jménem hráče, kterému server rozumí
+                        parts[i] = target.getName();
+                        changed = true;
+                    }
                 }
             }
         }
-        if (changed) event.setMessage(String.join(" ", parts));
+
+        // Pokud jsme našli a nahradili nějaký nick, aktualizujeme zprávu příkazu
+        if (changed) {
+            event.setMessage(String.join(" ", parts));
+        }
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.HIGHEST)
     public void onGlobalTab(TabCompleteEvent event) {
         boolean enabled = nicknamesConfig.getBoolean("settings.global-tab-complete", true);
         if (!enabled) return;
 
+        String buffer = event.getBuffer();
+        if (buffer.isEmpty() || !buffer.contains(" ")) return; // Funguje jen pro argumenty příkazů
+
         List<String> completions = new ArrayList<>(event.getCompletions());
-        for (String n : nicknames.values()) {
-            completions.add(ChatColor.stripColor(n));
+        String lastWord = buffer.substring(buffer.lastIndexOf(' ') + 1).toLowerCase();
+
+        // 1. Odstraníme z našeptávače reálná jména hráčů, kteří mají nastavený nick
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            if (nicknames.containsKey(online.getUniqueId())) {
+                completions.remove(online.getName());
+            }
         }
+
+        // 2. Přidáme do našeptávače nicky, které odpovídají rozepsanému slovu
+        for (String value : nicknames.values()) {
+            if (value != null && value.contains("|")) {
+                String nickOnly = ChatColor.stripColor(value.split("\\|")[0]);
+
+                if (nickOnly.toLowerCase().startsWith(lastWord) && !completions.contains(nickOnly)) {
+                    completions.add(nickOnly);
+                }
+            }
+        }
+
+        Collections.sort(completions);
         event.setCompletions(completions);
     }
 
@@ -289,7 +346,7 @@ public final class HrdaNick extends JavaPlugin implements Listener, CommandExecu
     public List<String> onTabComplete(CommandSender s, Command c, String a, String[] args) {
         if (args.length == 1) {
             List<String> opts = new ArrayList<>(Arrays.asList("reset"));
-            if (s.hasPermission("hrdanick.admin")) opts.addAll(Arrays.asList("set", "list", "reload", "resetall"));
+            if (s.hasPermission("hrdanick.admin")) opts.addAll(Arrays.asList("set", "list", "reload", "resetall", "random"));
             return StringUtil.copyPartialMatches(args[0], opts, new ArrayList<>());
         } else if (args.length == 2 && s.hasPermission("hrdanick.admin")) {
             List<String> pNames = new ArrayList<>();
